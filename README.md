@@ -1,41 +1,50 @@
-# Atlas com IA local
+# Atlas com SmolLM3 e navegador de pesquisa
 
-Este repositório contém o Atlas e o modelo Qwen3-0.6B quantizado `Q3_K_S`. O GGUF está versionado por Git LFS porque tem cerca de 390 MB. Durante o `npm install`, o `postinstall` em Node verifica o modelo, completa o download caso o host tenha recebido apenas o pointer do LFS, e obtém do GitHub o runtime CPU correto para Linux x64 ou ARM64. Não é necessário executar o instalador Bash.
+Este branch, `smollm3-3gb`, é a versão do Atlas preparada para o servidor Bronxy de **3 GB RAM, 4 cores e 4 GB de disco**. Ele usa o modelo **SmolLM3-3B Instruct Q4_K_M**, em GGUF de **1.915.305.312 bytes** (cerca de 1,92 GB), armazenado via Git LFS. **Não mude para este branch no servidor atual de 1 GB/1 GB de disco**: o peso não cabe nesse disco e a inferência pode ultrapassar a RAM disponível.
 
-## Instalar pelo GitHub
+## Instalar depois do upgrade
 
-No painel do servidor, configure o repositório Git como `https://github.com/gabexf6/atlas2.0.0-manus-ai.git` e mantenha a opção **Instalar Módulos** ativada. O repositório é público, então o clone não precisa de autenticação GitHub. Quando o painel executar `npm install`, a etapa `postinstall` prepara automaticamente o GGUF e o `llama-server`; depois o comando normal de inicialização do Atlas continua sendo `npm start`.
+1. Faça primeiro o upgrade do servidor para o plano de 3 GB RAM/4 GB de disco.
+2. No painel Bronxy, mantenha o repositório público `https://github.com/gabexf6/atlas2.0.0-manus-ai.git` e selecione o branch `smollm3-3gb`.
+3. Deixe **Instalar Módulos** ativado. O `npm install` executará `scripts/prepare-local-ai.mjs`, que valida o modelo, mostra progresso do download e obtém o runtime CPU oficial do llama.cpp para Linux ARM64 ou x64.
+4. Depois da instalação, use o comando normal do painel para iniciar o Atlas (`npm start`). Em um grupo, um administrador ativa com `/ia ativar`.
 
-Se estiver usando um clone manual, instale Git LFS antes de clonar para receber diretamente o modelo:
+Não é necessário rodar o Bash manualmente. O script `scripts/install-local-ai.sh` é apenas um atalho para o mesmo preparador Node. Se faltar espaço, o preparador não inicia/retoma o download e não interrompe o `npm install`; ele registra que a IA local não está pronta. Um arquivo parcial já existente fica preservado para possível retomada. Após liberar espaço, rode `npm install` novamente.
+
+Para um clone manual no disco de 4 GB, evite manter duas cópias grandes no cache LFS e na pasta de trabalho. Clone sem baixar o objeto LFS e deixe o `postinstall` baixar o GGUF uma vez para a pasta de modelos:
 
 ```sh
-git lfs install
-git clone https://github.com/gabexf6/atlas2.0.0-manus-ai.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --branch smollm3-3gb https://github.com/gabexf6/atlas2.0.0-manus-ai.git
 cd atlas2.0.0-manus-ai
 npm install
 npm start
 ```
 
-A rotina `postinstall` é Node.js, não Bash. Se o clone não tiver suporte a Git LFS, ela reconhece o arquivo pointer e baixa o mesmo modelo público do Hugging Face como fallback. O runtime CPU é baixado da release oficial do llama.cpp no GitHub de acordo com `process.arch`.
+## Modelo e RAM
 
-## Armazenamento
+- Modelo: [SmolLM3-3B Instruct](https://huggingface.co/HuggingFaceTB/SmolLM3-3B), quantização GGUF Q4_K_M do [ggml-org](https://huggingface.co/ggml-org/SmolLM3-3B-GGUF).
+- O cartão do modelo lista português entre os idiomas nativos e documenta o modo `/no_think`. O Atlas o usa para respostas comuns, reduzindo o raciocínio estendido desnecessário em CPU.
+- O llama-server carrega somente quando há uma pergunta, usa um slot, contexto inicial de 2.048 tokens e até três threads, e descarrega após dois minutos ocioso. O consumo durante a geração é maior que o uso em repouso; precisa ser medido no contêiner Bronxy.
+- O Chromium fecha depois da coleta das evidências e antes da inferência, para não somar seu pico de RAM ao do GGUF.
 
-O GGUF é servido por Git LFS, não como blob Git comum. O GitHub bloqueia arquivos Git comuns acima de 100 MiB; o limite individual do Git LFS no plano Free é 2 GiB. O GitHub informa 10 GiB de armazenamento e banda LFS incluídos no plano Free. Cada clone que baixa o modelo consome cerca de 390 MB de banda e pode, temporariamente, manter uma cópia no cache LFS e outra no diretório de trabalho. O `postinstall` tenta remover somente o objeto de cache duplicado depois de validar o GGUF para recuperar espaço; o espaço temporário durante o clone ainda pode ser apertado num servidor de 1 GB [1] [2] [3].
+## Internet, Wikipédia e navegador universal
 
-O projeto não versiona `node_modules`, sessão/autenticação do WhatsApp, bancos locais, logs nem `.env`. Preserve esses dados no painel e configure segredos somente nas variáveis de ambiente do servidor.
+Para perguntas factuais, o Atlas pesquisa resultados web e a Wikipédia em português. Além dos snippets, o navegador universal central do Atlas abre e lê até uma página pública encontrada para enriquecer a evidência. O texto da página é tratado como dado não confiável e o SmolLM3 só deve resumir evidências recebidas; se elas não bastarem, deve dizer que não conseguiu confirmar.
 
-## Modelo e uso
+O browser está liberado para **pesquisa e leitura de páginas públicas**: navegação HTTPS/GET, sem JavaScript, downloads, cliques, preenchimento de formulários, login ou ações externas. Endereços locais/privados são bloqueados. Isso permite que a IA consulte a web sem dar ao modelo autoridade para publicar, comprar, alterar contas ou baixar/executar arquivos. O Chromium é compartilhado com os subsistemas Atlas e limitado a um contexto de cada vez.
 
-- Modelo: Qwen3-0.6B Instruct, GGUF `Q3_K_S` convertido pela comunidade Bartowski.
-- Origem do GGUF: [bartowski/Qwen_Qwen3-0.6B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF).
-- Licença do modelo base: Apache-2.0; consulte os cartões do modelo e da conversão antes de redistribuir fora deste uso [4] [5].
-- O modelo é pequeno e não equivale ao ChatGPT. O Atlas pesquisa fontes atuais antes de sintetizar respostas.
-- Em repouso, o runtime local é descarregado após dois minutos sem pedidos. O GGUF permanece no disco, mas não fica residente na RAM.
+A Wikipédia é consultada pela API sob demanda; não é baixado um dump local, que não cabe no disco junto do modelo. Os subsistemas de jogos, livros, mangá, receitas e KissRush continuam fazendo buscas pelos adaptadores existentes. Para pedidos de jogos, a IA pesquisa primeiro GetMods, LiteAPKs, AN1 e AndroidTunado; ela não baixa nem instala APKs.
+
+## Git LFS e armazenamento
+
+O modelo está abaixo do limite individual de 2 GB por objeto do Git LFS Free, mas perto do teto. O GitHub informa 10 GiB de armazenamento e 10 GiB de banda gratuitos; cada instalação que transfere o GGUF consome aproximadamente 1,92 GB da banda do dono do repositório. O tamanho nominal de 4 GB do servidor também precisa comportar o Atlas, `node_modules`, runtime, logs, cache e temporários, portanto mantenha apenas um GGUF instalado. [1] [2]
+
+O repositório não versiona sessões do WhatsApp, autenticação, banco local, logs, `.env` ou `node_modules`. Preserve os dados existentes no painel e configure segredos apenas nas variáveis de ambiente do servidor.
 
 ## Referências
 
-[1]: https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github "Limites oficiais de arquivos e repositórios GitHub"
-[2]: https://docs.github.com/repositories/working-with-files/managing-large-files/about-git-large-file-storage "Limites do Git LFS no GitHub"
-[3]: https://docs.github.com/billing/managing-billing-for-git-large-file-storage/about-billing-for-git-large-file-storage "Cota gratuita e medição de Git LFS"
-[4]: https://huggingface.co/Qwen/Qwen3-0.6B "Cartão oficial do Qwen3-0.6B"
-[5]: https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF "Cartão da conversão GGUF"
+[1]: https://docs.github.com/repositories/working-with-files/managing-large-files/about-git-large-file-storage "Limites por arquivo do Git LFS"
+[2]: https://docs.github.com/billing/managing-billing-for-git-large-file-storage/about-billing-for-git-large-file-storage "Franquias gratuitas e cobrança do Git LFS"
+[3]: https://github.com/ggml-org/llama.cpp/releases/tag/b12199 "Runtime CPU llama.cpp b12199"
+[4]: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md "Configuração do servidor llama.cpp"
+[5]: https://www.mediawiki.org/wiki/API:Search "API oficial MediaWiki Search"

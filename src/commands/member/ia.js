@@ -11,7 +11,6 @@ import { cleanExternalText } from "../../services/httpLimits.js";
 import { isGroupAiEnabled, setGroupAiEnabled } from "../../utils/aiGroupSettings.js";
 
 const APP_PROVIDERS = new Set(["getmods", "liteapks", "an1", "androidtunado"]);
-const BROWSER_MODES = new Set(["apps", "books", "recipes", "manga", "kissrush"]);
 const SOURCE_MODES = new Map([
   ["web", "web"],
   ["internet", "web"],
@@ -207,15 +206,14 @@ export default {
       const evidence = request.mode === "general"
         ? await collectConversationEvidence(request.query)
         : await collectEvidence(request.mode, request.query, request.provider);
+      // Os modos geral/web e alguns catálogos usam o browser universal. Feche-o
+      // antes de carregar os pesos para evitar sobreposição de RAM.
+      const { closeBrowser } = await import("../../services/browserManager.js");
+      await closeBrowser().catch(() => {});
+
       if (!evidence.length) {
         await props.sendReply("Não encontrei fontes suficientes para responder. Tente reformular a busca.");
         return;
-      }
-
-      // A conversa geral pode rotear para qualquer catálogo; feche Chromium antes de carregar o GGUF.
-      if (request.mode === "general" || BROWSER_MODES.has(request.mode)) {
-        const { closeBrowser } = await import("../../services/browserManager.js");
-        await closeBrowser().catch(() => {});
       }
 
       const answer = await answerFromEvidence(request.query, evidence);

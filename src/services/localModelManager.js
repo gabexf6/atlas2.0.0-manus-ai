@@ -26,14 +26,14 @@ function configuredPort() {
 }
 
 const PORT = configuredPort();
-const CONTEXT_SIZE = boundedInteger(process.env.ATLAS_LLM_CTX_SIZE, 1024, 256, 2048);
-const THREADS = boundedInteger(process.env.ATLAS_LLM_THREADS, 1, 1, 2);
+const CONTEXT_SIZE = boundedInteger(process.env.ATLAS_LLM_CTX_SIZE, 2048, 512, 2048);
+const THREADS = boundedInteger(process.env.ATLAS_LLM_THREADS, 3, 1, 3);
 const BATCH_SIZE = boundedInteger(process.env.ATLAS_LLM_BATCH_SIZE, 32, 8, 128);
 const UBATCH_SIZE = boundedInteger(process.env.ATLAS_LLM_UBATCH_SIZE, 16, 8, 64);
-const START_TIMEOUT_MS = boundedInteger(process.env.ATLAS_LLM_START_TIMEOUT_MS, 120_000, 10_000, 240_000);
+const START_TIMEOUT_MS = boundedInteger(process.env.ATLAS_LLM_START_TIMEOUT_MS, 180_000, 10_000, 300_000);
 const IDLE_UNLOAD_MS = boundedInteger(process.env.ATLAS_LLM_IDLE_UNLOAD_MS, 120_000, 30_000, 600_000);
 const SERVER_BIN = path.resolve(PROJECT_ROOT, process.env.ATLAS_LLAMA_SERVER_BIN || "bin/llama-server");
-const MODEL_PATH = path.resolve(PROJECT_ROOT, process.env.ATLAS_LLM_MODEL_PATH || "models/Qwen_Qwen3-0.6B-Q3_K_S.gguf");
+const MODEL_PATH = path.resolve(PROJECT_ROOT, process.env.ATLAS_LLM_MODEL_PATH || "models/SmolLM3-Q4_K_M.gguf");
 const HEALTH_URL = `http://127.0.0.1:${PORT}/health`;
 
 let child = null;
@@ -58,6 +58,7 @@ async function isHealthy() {
 function buildArgs() {
   return [
     "--model", MODEL_PATH,
+    "--jinja",
     "--host", "127.0.0.1",
     "--port", String(PORT),
     "--ctx-size", String(CONTEXT_SIZE),
@@ -114,10 +115,10 @@ function scheduleIdleUnload() {
 async function startOwnedServer() {
   if (stopPromise) await stopPromise;
   if (!fs.existsSync(SERVER_BIN)) {
-    throw new Error("Runtime llama-server ausente. Execute: bash scripts/install-local-ai.sh");
+    throw new Error("Runtime llama-server ausente. Execute npm install ou node scripts/prepare-local-ai.mjs após liberar espaço.");
   }
   if (!fs.existsSync(MODEL_PATH)) {
-    throw new Error("Arquivo GGUF ausente. Execute: bash scripts/install-local-ai.sh");
+    throw new Error("Arquivo SmolLM3 ausente. Execute npm install ou node scripts/prepare-local-ai.mjs após liberar espaço.");
   }
 
   let spawnError = null;

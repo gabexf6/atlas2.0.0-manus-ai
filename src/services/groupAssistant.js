@@ -81,12 +81,6 @@ function searchQueryFor(text, context) {
   return cleanExternalText(`${context.slice(-contextLimit)} ${text}`, MAX_QUERY_CHARS);
 }
 
-function mayUseCatalogBrowser(text, evidence) {
-  const sourceMatch = evidence.some((item) => /getmods|liteapks|an1|androidtunado|receita|mang[aá]|kissrush/i.test(item?.source || ""));
-  const queryMatch = /\b(apk|app|apps|aplicativo|android|mod|manga|mangá|receita|receitas|kissrush|novel)\b/i.test(text);
-  return sourceMatch || queryMatch;
-}
-
 async function sendText(socket, remoteJid, text) {
   if (!text) return;
   await socket.sendMessage(remoteJid, { text: `${BOT_EMOJI} ${text}` });
@@ -190,11 +184,10 @@ async function processItem(item) {
 
   const query = searchQueryFor(text, context);
   const evidence = await collectConversationEvidence(query);
-  if (mayUseCatalogBrowser(query, evidence)) {
-    // Carregue o gerenciador somente quando um catálogo possa ter usado Chromium.
-    const { closeBrowser } = await import("./browserManager.js");
-    await closeBrowser().catch(() => {});
-  }
+  // Pesquisas gerais agora leem páginas pelo browser universal; feche Chromium
+  // antes de carregar o GGUF para não sobrepor os picos de RAM.
+  const { closeBrowser } = await import("./browserManager.js");
+  await closeBrowser().catch(() => {});
 
   if (!evidence.length) {
     await sendText(socket, remoteJid, "Não encontrei fontes suficientes para responder com segurança. Tenta reformular a pergunta.");

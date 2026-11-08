@@ -1,27 +1,42 @@
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readSync, closeSync, readFileSync, renameSync, rmSync, statSync, chmodSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readSync, closeSync, readFileSync, renameSync, rmSync, statSync, statfsSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 const require = createRequire(import.meta.url);
 const { version: nodeVersion } = require("../package.json");
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MODEL_PATH = path.join(ROOT, "models", "Qwen_Qwen3-0.6B-Q3_K_S.gguf");
+const MODEL_PATH = path.join(ROOT, "models", "SmolLM3-Q4_K_M.gguf");
 const MODEL_PART = `${MODEL_PATH}.part`;
-const MODEL_URL = "https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/main/Qwen_Qwen3-0.6B-Q3_K_S.gguf";
-const MIN_MODEL_BYTES = 350_000_000;
-const MAX_MODEL_BYTES = 420_000_000;
-const LLAMA_TAG = "b12110";
+const MODEL_URL = "https://huggingface.co/ggml-org/SmolLM3-3B-GGUF/resolve/main/SmolLM3-Q4_K_M.gguf";
+const MODEL_BYTES = 1_915_305_312;
+const MIN_MODEL_BYTES = MODEL_BYTES;
+const MAX_MODEL_BYTES = MODEL_BYTES;
+const MODEL_RESERVE_BYTES = 180_000_000;
+const LLAMA_TAG = "b12199";
 const TEMP_ROOT = path.join(ROOT, ".atlas-ai-install");
 const BIN_DIR = path.join(ROOT, "bin");
 const WRAPPER_PATH = path.join(BIN_DIR, "llama-server");
 
 function log(message) {
   console.log(`[Atlas IA] ${message}`);
+}
+
+function formatBytes(bytes) {
+  return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
+}
+
+function availableDiskBytes() {
+  try {
+    const stats = statfsSync(ROOT);
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }
 
 function isLfsPointer(filePath) {
@@ -72,8 +87,33 @@ async function downloadFile(url, destination, { minBytes, maxBytes, label }) {
   }
 
   const append = offset > 0 && response.status === 206;
+  const declaredLength = Number(response.headers.get("content-length"));
+  const expectedTotal = Number.isFinite(declaredLength) && declaredLength > 0
+    ? offset + declaredLength
+    : 0;
+  let receivedBytes = 0;
+  let lastLoggedMark = expectedTotal ? Math.floor((offset / expectedTotal) * 10) * 10 : 0;
+  let lastLoggedBytes = 0;
+  const progress = new Transform({
+    transform(chunk, _encoding, callback) {
+      receivedBytes += chunk.length;
+      const totalReceived = offset + receivedBytes;
+      if (expectedTotal) {
+        const mark = Math.floor((totalReceived / expectedTotal) * 10) * 10;
+        if (mark >= 10 && mark > lastLoggedMark) {
+          log(`${label}: ${Math.min(mark, 100)}% (${formatBytes(totalReceived)} / ${formatBytes(expectedTotal)}).`);
+          lastLoggedMark = mark;
+        }
+      } else if (receivedBytes - lastLoggedBytes >= 250_000_000) {
+        log(`${label}: ${formatBytes(totalReceived)} recebidos.`);
+        lastLoggedBytes = receivedBytes;
+      }
+      callback(null, chunk);
+    },
+  });
   await pipeline(
     Readable.fromWeb(response.body),
+    progress,
     createWriteStream(partPath, { flags: append ? "a" : "w" }),
   );
 
@@ -89,17 +129,27 @@ async function ensureModel() {
   mkdirSync(path.dirname(MODEL_PATH), { recursive: true });
   if (isValidModel(MODEL_PATH)) {
     log(`modelo GGUF já está presente (${statSync(MODEL_PATH).size} bytes).`);
-    return;
+    return true;
   }
 
-  if (isLfsPointer(MODEL_PATH)) {
-    log("o clone trouxe o pointer do Git LFS sem o conteúdo; baixando o mesmo GGUF da origem pública para completar o checkout.");
-    rmSync(MODEL_PATH, { force: true });
+  const hasLfsPointer = isLfsPointer(MODEL_PATH);
+  if (hasLfsPointer) {
+    log("o clone trouxe apenas o pointer do Git LFS; o postinstall buscará o GGUF original do Hugging Face.");
   } else if (existsSync(MODEL_PATH) && statSync(MODEL_PATH).size > 8192) {
     throw new Error(`Existe um arquivo GGUF inválido em ${MODEL_PATH}; ele foi preservado e não será sobrescrito.`);
   }
 
-  log("baixando Qwen3-0.6B Q3_K_S; são aproximadamente 390 MB e a instalação pode demorar.");
+  const partialSize = existsSync(MODEL_PART) ? statSync(MODEL_PART).size : 0;
+  const remainingBytes = Math.max(0, MODEL_BYTES - partialSize);
+  const freeBytes = availableDiskBytes();
+  if (freeBytes < remainingBytes + MODEL_RESERVE_BYTES) {
+    if (hasLfsPointer) rmSync(MODEL_PATH, { force: true });
+    log(`espaço insuficiente para o SmolLM3: há ${formatBytes(freeBytes)} livres e são necessários cerca de ${formatBytes(remainingBytes + MODEL_RESERVE_BYTES)}. O Atlas poderá iniciar sem IA local; libere espaço ou use o plano de 3 GB e rode npm install novamente.`);
+    return false;
+  }
+
+  if (hasLfsPointer) rmSync(MODEL_PATH, { force: true });
+  log("baixando SmolLM3-3B Q4_K_M (1,92 GB); o progresso será exibido a cada 10% e o arquivo parcial pode ser retomado.");
   const size = await downloadFile(MODEL_URL, MODEL_PATH, {
     minBytes: MIN_MODEL_BYTES,
     maxBytes: MAX_MODEL_BYTES,
@@ -110,6 +160,7 @@ async function ensureModel() {
     throw new Error("O arquivo baixado não passou pela verificação de formato GGUF.");
   }
   log(`modelo instalado (${size} bytes).`);
+  return true;
 }
 
 function sha256File(filePath) {
@@ -122,12 +173,28 @@ function sha256File(filePath) {
   });
 }
 
+function hasLfsObjectOfSize(directory, expectedSize) {
+  if (!existsSync(directory)) return false;
+  const pending = [directory];
+  while (pending.length) {
+    const current = pending.pop();
+    for (const entry of require("node:fs").readdirSync(current, { withFileTypes: true })) {
+      const candidate = path.join(current, entry.name);
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile() && statSync(candidate).size === expectedSize) return true;
+    }
+  }
+  return false;
+}
+
 async function pruneExactLfsCache() {
   const git = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: ROOT, encoding: "utf8" });
   if (git.status !== 0 || !git.stdout.trim()) return;
   const status = spawnSync("git", ["status", "--porcelain"], { cwd: ROOT, encoding: "utf8" });
   if (status.status !== 0 || status.stdout.trim()) return;
   const gitDir = path.resolve(ROOT, git.stdout.trim());
+  const lfsObjectsDir = path.join(gitDir, "lfs", "objects");
+  if (!hasLfsObjectOfSize(lfsObjectsDir, MODEL_BYTES)) return;
   const oid = await sha256File(MODEL_PATH);
   const objectPath = path.join(gitDir, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid);
   if (existsSync(objectPath)) {
@@ -157,6 +224,11 @@ function testRuntime(binaryPath) {
     log(`teste do runtime falhou: ${details || `código ${result.status}`}`);
     return false;
   }
+  const help = spawnSync(binaryPath, ["--help"], { encoding: "utf8", timeout: 15_000 });
+  if (help.error || help.status !== 0 || !`${help.stdout || ""}\n${help.stderr || ""}`.includes("--jinja")) {
+    log("runtime não anuncia --jinja; este branch exige suporte ao template SmolLM3 e vai baixar uma build compatível.");
+    return false;
+  }
   return true;
 }
 
@@ -171,7 +243,12 @@ async function ensureRuntime() {
   const arch = process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : null;
   if (!arch) throw new Error(`Arquitetura não suportada para o runtime: ${process.arch}.`);
 
-  if (testRuntime(WRAPPER_PATH)) {
+  const runtimeMarker = `llama-${LLAMA_TAG}-${arch}`;
+  if (
+    existsSync(WRAPPER_PATH) &&
+    readFileSync(WRAPPER_PATH, "utf8").includes(runtimeMarker) &&
+    testRuntime(WRAPPER_PATH)
+  ) {
     log("runtime llama-server já está pronto.");
     return;
   }
@@ -220,8 +297,12 @@ async function ensureRuntime() {
 
 async function main() {
   log(`preparando IA local para Node ${nodeVersion} (${process.platform}/${process.arch}).`);
+  if (process.platform !== "linux" || !["x64", "arm64"].includes(process.arch)) {
+    throw new Error(`A instalação automática requer Linux x64 ou ARM64; nenhum download grande foi iniciado (${process.platform}/${process.arch}).`);
+  }
   mkdirSync(TEMP_ROOT, { recursive: true });
-  await ensureModel();
+  const modelReady = await ensureModel();
+  if (!modelReady) return;
   await ensureRuntime();
   await pruneExactLfsCache();
   log("preparação concluída; o Atlas carregará o modelo sob demanda.");

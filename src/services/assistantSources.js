@@ -123,7 +123,11 @@ function catalogResultMatches(title, url, query) {
 }
 
 function normalizeResearchQuery(value) {
-  return normalizeKeywords(value)
+  const original = normalizeKeywords(value);
+  if (/\bdom\s+pedro\s+(?:ii|segundo)\b/.test(original)) {
+    return "Pedro II do Brasil imperador";
+  }
+  return original
     .replace(/\b(?:quem foi|quem era|o que foi|o que e|qual foi|me fala sobre|me fale sobre|fale sobre|eu quero saber|quero saber|me explica|explica melhor|hein|oxi|oxe)\b/g, " ")
     .replace(/\b(?:ele|ela|eles|elas|isso|esse|essa|aquele|aquela)\b/g, " ")
     .replace(/\bdom\b/g, " ")
@@ -245,7 +249,8 @@ export async function collectEvidence(mode, query, providerName = "") {
 
   if (mode === "web" || mode === "wiki") {
     const { searchWeb, searchWikipedia } = await import("./knowledgeSearch.js");
-    return mode === "web" ? searchWeb(safeQuery) : searchWikipedia(safeQuery);
+    const researchQuery = normalizeResearchQuery(safeQuery);
+    return mode === "web" ? searchWeb(researchQuery) : searchWikipedia(researchQuery);
   }
 
   if (mode === "apps") return searchApps(providerName, safeQuery);
