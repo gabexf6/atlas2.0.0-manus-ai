@@ -1,0 +1,211 @@
+import { BOT_EMOJI } from "../config.js";
+import { getPrefix } from "../utils/database.js";
+import { isGroupAiEnabled } from "../utils/aiGroupSettings.js";
+import { answerFromEvidence } from "./localAssistant.js";
+import { collectConversationEvidence } from "./assistantSources.js";
+import { cleanExternalText } from "./httpLimits.js";
+import { warningLog } from "../utils/logger.js";
+
+const MAX_QUEUE = 2;
+const MAX_QUERY_CHARS = 240;
+const GROUP_COOLDOWN_MS = 12_000;
+const SENDER_COOLDOWN_MS = 25_000;
+const MAX_PER_GROUP_PER_MINUTE = 4;
+const FAILURE_NOTICE_COOLDOWN_MS = 5 * 60_000;
+const MAX_TRACKED_KEYS = 128;
+
+const queue = [];
+const lastGroupEnqueue = new Map();
+const lastSenderEnqueue = new Map();
+const groupWindows = new Map();
+const seenMessageIds = new Map();
+const recentUserMessages = new Map();
+const lastFailureNotice = new Map();
+let draining = false;
+
+function trimMap(map, maxSize = MAX_TRACKED_KEYS) {
+  while (map.size > maxSize) map.delete(map.keys().next().value);
+}
+
+function isNoise(text) {
+  const normalized = text.trim().toLocaleLowerCase("pt-BR");
+  return /^(?:k{3,}|r+s{2,}|rsrs+|[😂🤣😅😆👍❤️💙💚✨🙏]+)$/u.test(normalized);
+}
+
+function greetingReply(text) {
+  const normalized = text
+    .toLocaleLowerCase("pt-BR")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[!?.,]+/g, " ")
+    .trim();
+  if (/^(oi+|ola|opa|salve|bom dia|boa tarde|boa noite|e ai|fala|tudo bem)$/.test(normalized)) {
+    return "Oi! Manda a pergunta ou o assunto; quando for algo factual, eu pesquiso antes de responder.";
+  }
+  return "";
+}
+
+function formatReferences(evidence) {
+  return evidence.slice(0, 4).map((item, index) => {
+    const title = cleanExternalText(item?.title, 110).replace(/[*_~`]/g, "");
+    const source = cleanExternalText(item?.source, 80).replace(/[*_~`]/g, "");
+    const url = cleanExternalText(item?.url, 240);
+    const label = title || source || "Fonte consultada";
+    return url ? `${index + 1}. ${label} — ${url}` : `${index + 1}. ${label}`;
+  }).join("\n");
+}
+
+function rememberMessage(actorKey, text) {
+  const prior = recentUserMessages.get(actorKey);
+  const messages = prior && Date.now() - prior.updatedAt < 60 * 60_000 ? prior.messages : [];
+  messages.push(text);
+  recentUserMessages.set(actorKey, { messages: messages.slice(-2), updatedAt: Date.now() });
+  trimMap(recentUserMessages);
+}
+
+function getConversationContext(actorKey) {
+  const prior = recentUserMessages.get(actorKey);
+  if (!prior) return "";
+  if (Date.now() - prior.updatedAt > 60 * 60_000) {
+    recentUserMessages.delete(actorKey);
+    return "";
+  }
+  return prior.messages.slice(-1)[0] || "";
+}
+
+function isFollowUp(text) {
+  return /^(?:e\b|isso\b|ele\b|ela\b|esse\b|essa\b|onde\b|quando\b|por que\b|qual deles\b|mais\b|como assim\b)/i.test(text.trim());
+}
+
+function searchQueryFor(text, context) {
+  if (!context || !isFollowUp(text)) return text;
+  const contextLimit = Math.max(0, MAX_QUERY_CHARS - text.length - 1);
+  if (contextLimit === 0) return text;
+  return cleanExternalText(`${context.slice(-contextLimit)} ${text}`, MAX_QUERY_CHARS);
+}
+
+function mayUseCatalogBrowser(text, evidence) {
+  const sourceMatch = evidence.some((item) => /getmods|liteapks|an1|androidtunado|receita|mang[aá]|kissrush/i.test(item?.source || ""));
+  const queryMatch = /\b(apk|app|apps|aplicativo|android|mod|manga|mangá|receita|receitas|kissrush|novel)\b/i.test(text);
+  return sourceMatch || queryMatch;
+}
+
+async function sendText(socket, remoteJid, text) {
+  if (!text) return;
+  await socket.sendMessage(remoteJid, { text: `${BOT_EMOJI} ${text}` });
+}
+
+async function processItem(item) {
+  const { socket, remoteJid, text, actorKey } = item;
+  const context = getConversationContext(actorKey);
+  rememberMessage(actorKey, text);
+  const greeting = greetingReply(text);
+  if (greeting) {
+    await sendText(socket, remoteJid, greeting);
+    return;
+  }
+
+  const query = searchQueryFor(text, context);
+  const evidence = await collectConversationEvidence(query);
+  if (mayUseCatalogBrowser(query, evidence)) {
+    // Carregue o gerenciador somente quando um catálogo possa ter usado Chromium.
+    const { closeBrowser } = await import("./browserManager.js");
+    await closeBrowser().catch(() => {});
+  }
+
+  if (!evidence.length) {
+    await sendText(socket, remoteJid, "Não encontrei fontes suficientes para responder com segurança. Tenta reformular a pergunta.");
+    return;
+  }
+
+  const selectedEvidence = evidence.slice(0, 4);
+  const answer = await answerFromEvidence(text, selectedEvidence, context);
+  const references = formatReferences(selectedEvidence);
+  const response = references
+    ? `${answer}\n\nFontes consultadas:\n${references}`
+    : answer;
+  await sendText(socket, remoteJid, cleanExternalText(response, 3000));
+}
+
+async function drainQueue() {
+  if (draining) return;
+  draining = true;
+  try {
+    while (queue.length) {
+      const item = queue.shift();
+      try {
+        await processItem(item);
+      } catch (error) {
+        warningLog(`Falha na IA de grupo ${item.remoteJid}: ${error.message}`);
+        const lastNotice = lastFailureNotice.get(item.remoteJid) || 0;
+        if (Date.now() - lastNotice >= FAILURE_NOTICE_COOLDOWN_MS) {
+          lastFailureNotice.set(item.remoteJid, Date.now());
+          trimMap(lastFailureNotice);
+          await sendText(
+            item.socket,
+            item.remoteJid,
+            "Não consegui carregar a IA local. Confere se o instalador scripts/install-local-ai.sh já foi executado no servidor.",
+          ).catch(() => {});
+        }
+      }
+    }
+  } finally {
+    draining = false;
+    if (queue.length) void drainQueue();
+  }
+}
+
+export function enqueueGroupAssistant({ socket, webMessage, fullMessage, remoteJid, userLid }) {
+  if (
+    !socket ||
+    !String(remoteJid || "").endsWith("@g.us") ||
+    webMessage?.key?.fromMe ||
+    !isGroupAiEnabled(remoteJid)
+  ) {
+    return false;
+  }
+
+  const text = cleanExternalText(fullMessage, MAX_QUERY_CHARS);
+  if (!text || text === "#auto-command" || text.length < 3 || isNoise(text)) return false;
+
+  const prefix = getPrefix(remoteJid);
+  if (prefix && text.startsWith(prefix)) return false;
+
+  const messageId = String(webMessage?.key?.id || "");
+  if (messageId && seenMessageIds.has(messageId)) return false;
+  if (messageId) {
+    seenMessageIds.set(messageId, Date.now());
+    for (const [id, timestamp] of seenMessageIds) {
+      if (Date.now() - timestamp > 10 * 60_000) seenMessageIds.delete(id);
+    }
+    trimMap(seenMessageIds, 256);
+  }
+
+  if (queue.length >= MAX_QUEUE) return false;
+
+  const now = Date.now();
+  const lastGroupAt = lastGroupEnqueue.get(remoteJid) || 0;
+  if (now - lastGroupAt < GROUP_COOLDOWN_MS) return false;
+
+  const sender = String(userLid || webMessage?.key?.participant || "unknown").replace(/:[0-9]+(?=@)/g, "");
+  const actorKey = `${remoteJid}:${sender}`;
+  const lastSenderAt = lastSenderEnqueue.get(actorKey) || 0;
+  if (now - lastSenderAt < SENDER_COOLDOWN_MS) return false;
+
+  const window = groupWindows.get(remoteJid);
+  const currentWindow = !window || now - window.startedAt >= 60_000
+    ? { startedAt: now, count: 0 }
+    : window;
+  if (currentWindow.count >= MAX_PER_GROUP_PER_MINUTE) return false;
+  currentWindow.count += 1;
+  groupWindows.set(remoteJid, currentWindow);
+  lastGroupEnqueue.set(remoteJid, now);
+  lastSenderEnqueue.set(actorKey, now);
+  trimMap(groupWindows);
+  trimMap(lastGroupEnqueue);
+  trimMap(lastSenderEnqueue);
+
+  queue.push({ socket, remoteJid, text, actorKey });
+  void drainQueue();
+  return true;
+}
