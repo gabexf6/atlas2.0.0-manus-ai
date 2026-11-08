@@ -1,5 +1,10 @@
 import { isOwner } from "../../middlewares/index.js";
-import { collectConversationEvidence, collectEvidence } from "../../services/assistantSources.js";
+import {
+  collectConversationEvidence,
+  collectEvidence,
+  parseGameDeliveryIntent,
+  searchGameCatalogs,
+} from "../../services/assistantSources.js";
 import { answerFromEvidence } from "../../services/localAssistant.js";
 import { cleanExternalText } from "../../services/httpLimits.js";
 import { isGroupAiEnabled, setGroupAiEnabled } from "../../utils/aiGroupSettings.js";
@@ -43,14 +48,21 @@ function parseRequest(rawValue) {
   return { mode, query: rest };
 }
 
-function formatReferences(evidence) {
-  return evidence.slice(0, 6).map((item, index) => {
-    const title = cleanExternalText(item?.title, 150).replace(/[*_~`]/g, "");
-    const source = cleanExternalText(item?.source, 120).replace(/[*_~`]/g, "");
-    const url = cleanExternalText(item?.url, 400);
-    const label = title || source || "Fonte consultada";
-    return url ? `${index + 1}. ${label} — ${url}` : `${index + 1}. ${label}`;
-  }).join("\n");
+function formatGameReply(result) {
+  const failed = result.checked.filter((item) => !item.ok);
+  if (result.matches.length) {
+    const found = result.matches
+      .map((item) => `“${cleanExternalText(item.title, 100)}” no ${item.source}`)
+      .join("; ");
+    return `Achei ${found}. Só um detalhe: esses catálogos entregam metadados da página, não o arquivo do jogo; o Atlas ainda não consegue anexar o APK. Então não vou mandar link de terceiros.`;
+  }
+  if (failed.length === result.checked.length) {
+    return "Os catálogos internos não responderam agora. Tenta de novo daqui a pouco.";
+  }
+  if (failed.length) {
+    return `Não encontrei o jogo nos catálogos que responderam. A consulta falhou em ${failed.map((item) => item.source).join(", ")}, então não consigo confirmar esses catálogos agora.`;
+  }
+  return `Procurei “${cleanExternalText(result.query, 100)}” nos catálogos do Atlas (GetMods, LiteAPKs, AN1 e Android Tunado), mas não achei. Se houver outra grafia, me fala que tento de novo.`;
 }
 
 function identityVariants(value) {
@@ -111,7 +123,7 @@ async function handleGroupToggle(action, props) {
   try {
     setGroupAiEnabled(remoteJid, enabled);
     await sendReply(enabled
-      ? "IA ativada neste grupo. Vou pesquisar fontes antes de responder mensagens comuns. Use /ia desativar para parar."
+      ? "Pronto, ativei a IA neste grupo. Pode conversar comigo normalmente; quando for algo factual, vou pesquisar antes de responder. Para desligar, use /ia desativar."
       : "IA desativada neste grupo.");
   } catch {
     await sendWarningReply("Não consegui salvar a configuração da IA para este grupo.");
@@ -129,6 +141,24 @@ export default {
     const action = rawArgs.toLocaleLowerCase("pt-BR");
     if (["ativar", "desativar", "status"].includes(action)) {
       await handleGroupToggle(action, props);
+      return;
+    }
+
+    const gameIntent = parseGameDeliveryIntent(rawArgs);
+    if (gameIntent?.kind === "clarify") {
+      await props.sendReply("Você quer um jogo ou aplicativo? Diga o nome junto com “jogo” (por exemplo: /ia me envie o jogo Journeys) e eu procuro nos catálogos do Atlas.");
+      return;
+    }
+    if (gameIntent?.kind === "game") {
+      await props.sendWaitReply(`Procurando “${gameIntent.query}” nos catálogos internos do Atlas...`);
+      let result;
+      try {
+        result = await searchGameCatalogs(gameIntent.query);
+      } finally {
+        const { closeBrowser } = await import("../../services/browserManager.js");
+        await closeBrowser().catch(() => {});
+      }
+      await props.sendReply(formatGameReply(result));
       return;
     }
 
@@ -163,11 +193,10 @@ export default {
       }
 
       const answer = await answerFromEvidence(request.query, evidence);
-      const references = formatReferences(evidence);
-      await props.sendReply(`${answer}\n\nFontes consultadas:\n${references}`);
+      await props.sendReply(cleanExternalText(answer, 1800));
     } catch {
       await props.sendWarningReply(
-        "Não consegui concluir a pesquisa. Verifique a conexão e execute scripts/install-local-ai.sh no servidor para instalar o modelo e o runtime local.",
+        "Não consegui concluir a pesquisa. Verifique a conexão e confirme que a instalação automática terminou no npm install; depois reinicie o servidor no painel.",
       );
     }
   },

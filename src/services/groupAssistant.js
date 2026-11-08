@@ -2,7 +2,11 @@ import { BOT_EMOJI } from "../config.js";
 import { getPrefix } from "../utils/database.js";
 import { isGroupAiEnabled } from "../utils/aiGroupSettings.js";
 import { answerFromEvidence } from "./localAssistant.js";
-import { collectConversationEvidence } from "./assistantSources.js";
+import {
+  collectConversationEvidence,
+  parseGameDeliveryIntent,
+  searchGameCatalogs,
+} from "./assistantSources.js";
 import { cleanExternalText } from "./httpLimits.js";
 import { warningLog } from "../utils/logger.js";
 
@@ -45,16 +49,6 @@ function greetingReply(text) {
   return "";
 }
 
-function formatReferences(evidence) {
-  return evidence.slice(0, 4).map((item, index) => {
-    const title = cleanExternalText(item?.title, 110).replace(/[*_~`]/g, "");
-    const source = cleanExternalText(item?.source, 80).replace(/[*_~`]/g, "");
-    const url = cleanExternalText(item?.url, 240);
-    const label = title || source || "Fonte consultada";
-    return url ? `${index + 1}. ${label} — ${url}` : `${index + 1}. ${label}`;
-  }).join("\n");
-}
-
 function rememberMessage(actorKey, text) {
   const prior = recentUserMessages.get(actorKey);
   const messages = prior && Date.now() - prior.updatedAt < 60 * 60_000 ? prior.messages : [];
@@ -74,7 +68,7 @@ function getConversationContext(actorKey) {
 }
 
 function isFollowUp(text) {
-  return /^(?:e\b|isso\b|ele\b|ela\b|esse\b|essa\b|onde\b|quando\b|por que\b|qual deles\b|mais\b|como assim\b)/i.test(text.trim());
+  return /^(?:e\b|isso\b|ele\b|ela\b|esse\b|essa\b|sim\b|não\b|nao\b|onde\b|quando\b|por que\b|qual deles\b|mais\b|como assim\b)/i.test(text.trim());
 }
 
 function searchQueryFor(text, context) {
@@ -95,13 +89,51 @@ async function sendText(socket, remoteJid, text) {
   await socket.sendMessage(remoteJid, { text: `${BOT_EMOJI} ${text}` });
 }
 
+function gameSearchReply(result) {
+  const failed = result.checked.filter((item) => !item.ok);
+  if (result.matches.length) {
+    const found = result.matches
+      .map((item) => `“${cleanExternalText(item.title, 100)}” no ${item.source}`)
+      .join("; ");
+    return `Achei ${found}. Só um detalhe: esses catálogos entregam metadados da página, não o arquivo do jogo; o Atlas ainda não consegue anexar o APK. Então não vou mandar link de terceiros.`;
+  }
+  if (failed.length === result.checked.length) {
+    return "Os catálogos internos não responderam agora. Tenta de novo daqui a pouco.";
+  }
+  if (failed.length) {
+    return `Não encontrei o jogo nos catálogos que responderam. A consulta falhou em ${failed.map((item) => item.source).join(", ")}, então não consigo confirmar esses catálogos agora.`;
+  }
+  return `Procurei “${cleanExternalText(result.query, 100)}” nos catálogos do Atlas (GetMods, LiteAPKs, AN1 e Android Tunado), mas não achei. Se houver outra grafia, me fala que tento de novo.`;
+}
+
 async function processItem(item) {
   const { socket, remoteJid, text, actorKey } = item;
-  const context = getConversationContext(actorKey);
+  const context = isFollowUp(text) ? getConversationContext(actorKey) : "";
   rememberMessage(actorKey, text);
   const greeting = greetingReply(text);
   if (greeting) {
     await sendText(socket, remoteJid, greeting);
+    return;
+  }
+
+  const gameIntent = parseGameDeliveryIntent(text);
+  if (gameIntent?.kind === "clarify") {
+    await sendText(
+      socket,
+      remoteJid,
+      `Você quer um jogo ou aplicativo? Me diga o nome junto com “jogo” (por exemplo: “me envie o jogo Journeys”) e eu procuro nos catálogos do Atlas.`,
+    );
+    return;
+  }
+  if (gameIntent?.kind === "game") {
+    let result;
+    try {
+      result = await searchGameCatalogs(gameIntent.query);
+    } finally {
+      const { closeBrowser } = await import("./browserManager.js");
+      await closeBrowser().catch(() => {});
+    }
+    await sendText(socket, remoteJid, gameSearchReply(result));
     return;
   }
 
@@ -120,11 +152,7 @@ async function processItem(item) {
 
   const selectedEvidence = evidence.slice(0, 4);
   const answer = await answerFromEvidence(text, selectedEvidence, context);
-  const references = formatReferences(selectedEvidence);
-  const response = references
-    ? `${answer}\n\nFontes consultadas:\n${references}`
-    : answer;
-  await sendText(socket, remoteJid, cleanExternalText(response, 3000));
+  await sendText(socket, remoteJid, cleanExternalText(answer, 1800));
 }
 
 async function drainQueue() {
@@ -144,7 +172,7 @@ async function drainQueue() {
           await sendText(
             item.socket,
             item.remoteJid,
-            "Não consegui carregar a IA local. Confere se o instalador scripts/install-local-ai.sh já foi executado no servidor.",
+            "Não consegui concluir a pesquisa agora. Tenta de novo daqui a pouco; se continuar, confere a conexão do servidor.",
           ).catch(() => {});
         }
       }

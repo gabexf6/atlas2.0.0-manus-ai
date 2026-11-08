@@ -59,6 +59,70 @@ function normalizeKeywords(value) {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
+const DELIVERY_ACTION = /\b(?:envia|envie|enviar|manda|mande|mandar|baixa|baixe|baixar|download|procura|procure|buscar|busca|busque|encontra|encontre|encontrar|acha|ache|arranja|arranje)\b/;
+const AVAILABILITY_QUESTION = /^(?:tem|temos|existe|consegue\s+(?:achar|encontrar)|voc[eê]\s+tem)\b/;
+const APP_TYPE = /\b(?:jogo|jogos|game|games|apk|apps?|aplicativo|aplicativos|mods?)\b/;
+const OTHER_CONTENT_TYPE = /\b(?:livros?|books?|receitas?|mangas?|novels?|resumos?)\b/;
+
+function stripDeliveryWords(raw) {
+  return cleanExternalText(raw, 240)
+    .replace(/^\s*(?:por favor\s+)?(?:me\s+)?(?:voc[eê]\s+)?(?:temos|tem|existe|consegue\s+(?:achar|encontrar)|envia|envie|enviar|manda|mande|mandar|baixa|baixe|baixar|download|procura|procure|buscar|busca|busque|encontra|encontre|encontrar|acha|ache|arranja|arranje)\s+/i, "")
+    .replace(/^\s*(?:o|a|um|uma)\s+/i, "")
+    .replace(/^\s*(?:jogos?|games?|apk|apps?|aplicativos?|mods?)\b[\s:,-]*/i, "")
+    .replace(/^\s*(?:do|da|de)\s+/i, "")
+    .replace(/(?:,?\s*)(?:por favor|por gentileza|pfv)$/i, "")
+    .replace(/[?!.,]+\s*$/, "")
+    .trim();
+}
+
+export function parseGameDeliveryIntent(rawQuery) {
+  const raw = cleanExternalText(rawQuery, 240).trim();
+  const normalized = normalizeKeywords(raw);
+  if (!raw || (!DELIVERY_ACTION.test(normalized) && !AVAILABILITY_QUESTION.test(normalized)) || OTHER_CONTENT_TYPE.test(normalized)) return null;
+
+  const query = stripDeliveryWords(raw);
+  if (!APP_TYPE.test(normalized)) return { kind: "clarify", query };
+  if (!query) return { kind: "clarify", query: "" };
+  return { kind: "game", query };
+}
+
+function catalogResultMatches(title, url, query) {
+  const terms = normalizeKeywords(query)
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((term) => term.length > 1);
+  if (!terms.length) return false;
+
+  const candidate = normalizeKeywords(`${title || ""} ${url || ""}`)
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(/\s+/);
+  return terms.every((term) => candidate.some((word) => word === term || (term.length >= 4 && word.includes(term))));
+}
+
+function normalizeResearchQuery(value) {
+  return normalizeKeywords(value)
+    .replace(/^(?:quem foi|quem era|o que foi|o que e|qual foi|me fala sobre|me fale sobre|fale sobre)\s+/, "")
+    .replace(/\bdom\b/g, " ")
+    .replace(/\bprimeiro\b/g, " i ")
+    .replace(/\bsegundo\b/g, " ii ")
+    .replace(/\bterceiro\b/g, " iii ")
+    .replace(/[?!.,]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim() || String(value || "");
+}
+
+function removeConflictingYearResults(question, results) {
+  const targetYear = normalizeKeywords(question).match(/\b(?:19|20)\d{2}\b/g)?.at(-1);
+  if (!targetYear) return results;
+  const filtered = results.filter((item) => {
+    const titleYear = normalizeKeywords(item?.title).match(/\b(?:19|20)\d{2}\b/)?.[0];
+    return !titleYear || titleYear === targetYear;
+  });
+  return filtered.length ? filtered : results;
+}
+
 async function searchApps(providerName, query) {
   const provider = APP_PROVIDERS[providerName];
   if (!provider) throw new Error("Provedor de apps não reconhecido.");
@@ -145,14 +209,16 @@ export async function collectEvidence(mode, query, providerName = "") {
 
   if (mode === "general") {
     const { searchWeb, searchWikipedia } = await import("./knowledgeSearch.js");
+    const researchQuery = normalizeResearchQuery(safeQuery);
     const outcomes = await Promise.allSettled([
-      searchWikipedia(safeQuery),
-      searchWeb(safeQuery),
+      searchWikipedia(researchQuery),
+      searchWeb(researchQuery),
     ]);
-    return outcomes
+    const results = outcomes
       .filter((outcome) => outcome.status === "fulfilled")
       .flatMap((outcome) => outcome.value)
       .slice(0, 6);
+    return removeConflictingYearResults(safeQuery, results);
   }
 
   if (mode === "web" || mode === "wiki") {
@@ -190,6 +256,45 @@ async function tryInternalSearch(searcher, query) {
   } catch {
     return [];
   }
+}
+
+/** Pesquise sequencialmente os quatro catálogos internos, sem busca geral na web. */
+export async function searchGameCatalogs(rawQuery) {
+  const query = validateSearchQuery(rawQuery);
+  const matches = [];
+  const checked = [];
+
+  for (const providerName of Object.keys(APP_PROVIDERS)) {
+    const provider = APP_PROVIDERS[providerName];
+    try {
+      const service = await import(provider.module);
+      const results = await service.searchPosts(query);
+      let match = null;
+
+      for (const item of (Array.isArray(results) ? results : []).slice(0, 3)) {
+        const url = safeProviderUrl(item?.url, provider.hosts);
+        let title = cleanExternalText(item?.title, 180);
+        if (!url || !catalogResultMatches(title, url, query)) continue;
+
+        if (typeof service.getPostDetails === "function") {
+          try {
+            const details = await service.getPostDetails(url);
+            title = cleanExternalText(details?.title, 180) || title;
+          } catch {}
+        }
+        if (!catalogResultMatches(title, url, query)) continue;
+        match = { source: provider.label, title, url };
+        break;
+      }
+
+      checked.push({ source: provider.label, ok: true });
+      if (match) matches.push(match);
+    } catch {
+      checked.push({ source: provider.label, ok: false });
+    }
+  }
+
+  return { query, matches, checked };
 }
 
 /**
