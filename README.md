@@ -4,7 +4,7 @@ Este repositório contém o Atlas e o modelo Qwen3-0.6B quantizado `Q3_K_S`. O G
 
 ## Instalar pelo GitHub
 
-No painel do servidor, configure o repositório Git como `https://github.com/gabexf6/atlas2.0.0-manus-ai.git` e mantenha a opção **Instalar Módulos** ativada. O repositório é privado, então o painel precisa estar autorizado a clonar repositórios privados da conta `gabexf6`. Quando o painel executar `npm install`, a etapa `postinstall` prepara automaticamente o GGUF e o `llama-server`; depois o comando normal de inicialização do Atlas continua sendo `npm start`.
+No painel do servidor, configure o repositório Git como `https://github.com/gabexf6/atlas2.0.0-manus-ai.git` e mantenha a opção **Instalar Módulos** ativada. O repositório é público, então o clone não precisa de autenticação GitHub. Quando o painel executar `npm install`, a etapa `postinstall` prepara automaticamente o GGUF e o `llama-server`; depois o comando normal de inicialização do Atlas continua sendo `npm start`.
 
 Se estiver usando um clone manual, instale Git LFS antes de clonar para receber diretamente o modelo:
 

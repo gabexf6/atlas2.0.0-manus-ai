@@ -13,7 +13,7 @@ function normalize(text = '') {
     .trim();
 }
 
-export async function searchPosts(query) {
+export async function searchPosts(query, { fast = false } = {}) {
   const context = await createContext({
     userAgent: USER_AGENT,
     locale: 'pt-BR',
@@ -29,10 +29,10 @@ export async function searchPosts(query) {
 
     await page.goto(searchUrl, {
       waitUntil: 'domcontentloaded',
-      timeout: 60000,
+      timeout: fast ? 12000 : 60000,
     });
 
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(fast ? 900 : 4000);
 
     const results = await page.evaluate(() => {
       const found = new Map();

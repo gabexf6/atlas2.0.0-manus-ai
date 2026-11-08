@@ -2,6 +2,7 @@ import { isOwner } from "../../middlewares/index.js";
 import {
   collectConversationEvidence,
   collectEvidence,
+  parseGamePageLinkRequest,
   parseGameDeliveryIntent,
   searchGameCatalogs,
 } from "../../services/assistantSources.js";
@@ -63,6 +64,13 @@ function formatGameReply(result) {
     return `Não encontrei o jogo nos catálogos que responderam. A consulta falhou em ${failed.map((item) => item.source).join(", ")}, então não consigo confirmar esses catálogos agora.`;
   }
   return `Procurei “${cleanExternalText(result.query, 100)}” nos catálogos do Atlas (GetMods, LiteAPKs, AN1 e Android Tunado), mas não achei. Se houver outra grafia, me fala que tento de novo.`;
+}
+
+function formatGamePageLinkReply(result, query) {
+  const match = result.matches[0];
+  if (match?.url) return `Claro, achei a página “${cleanExternalText(match.title, 100)}” no ${match.source}: ${cleanExternalText(match.url, 300)}`;
+  if (result.checked.length && result.checked.every((item) => !item.ok)) return "Não consegui consultar os catálogos agora. Tenta de novo daqui a pouco.";
+  return `Não achei a página de “${cleanExternalText(query, 100)}” nos catálogos que responderam.`;
 }
 
 function identityVariants(value) {
@@ -141,6 +149,24 @@ export default {
     const action = rawArgs.toLocaleLowerCase("pt-BR");
     if (["ativar", "desativar", "status"].includes(action)) {
       await handleGroupToggle(action, props);
+      return;
+    }
+
+    const pageLinkIntent = parseGamePageLinkRequest(rawArgs);
+    if (pageLinkIntent) {
+      if (!pageLinkIntent.query) {
+        await props.sendReply("Qual jogo? Me diga o nome e eu procuro a página nos catálogos do Atlas.");
+        return;
+      }
+      await props.sendWaitReply(`Procurando a página de “${pageLinkIntent.query}” nos catálogos do Atlas...`);
+      let result;
+      try {
+        result = await searchGameCatalogs(pageLinkIntent.query);
+      } finally {
+        const { closeBrowser } = await import("../../services/browserManager.js");
+        await closeBrowser().catch(() => {});
+      }
+      await props.sendReply(formatGamePageLinkReply(result, pageLinkIntent.query));
       return;
     }
 

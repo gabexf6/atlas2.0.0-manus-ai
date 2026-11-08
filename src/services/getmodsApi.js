@@ -113,7 +113,7 @@ export async function getRecentPosts() {
   }
 }
 
-export async function searchPosts(query) {
+export async function searchPosts(query, { fast = false } = {}) {
   const context = await createContext({
     userAgent: USER_AGENT,
     locale: 'pt-BR'
@@ -143,45 +143,43 @@ export async function searchPosts(query) {
       tokens = rawTokens.filter(t => t.length > 0);
     }
 
-    console.log(`[getmods] 🔎 Buscando "${query}" no sitemap...`);
+    if (!fast) {
+      console.log(`[getmods] 🔎 Buscando "${query}" no sitemap...`);
+      const sitemapLinks = await getPostSitemapLinks(page);
+      const foundUrls = [];
 
-    const sitemapLinks = await getPostSitemapLinks(page);
-    let foundUrls = [];
-
-    for (const sitemapUrl of sitemapLinks) {
-      const posts = await parsePostSitemap(page, sitemapUrl);
-
-      for (const post of posts) {
-        const urlNorm = post.url
-          .toLowerCase()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '');
-
-        if (tokens.every(t => urlNorm.includes(t))) {
-          foundUrls.push({
-            url: post.url,
-            title: query
-          });
+      for (const sitemapUrl of sitemapLinks) {
+        const posts = await parsePostSitemap(page, sitemapUrl);
+        for (const post of posts) {
+          const urlNorm = post.url
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+          if (tokens.every(t => urlNorm.includes(t))) {
+            foundUrls.push({ url: post.url, title: query });
+          }
         }
+      }
+
+      if (foundUrls.length > 0) {
+        await page.close();
+        await context.close();
+        return foundUrls;
       }
     }
 
-    if (foundUrls.length > 0) {
-      await page.close();
-      await context.close();
-      return foundUrls;
-    }
-
-    console.log('[getmods] ⚠️ Não achou no sitemap. Tentando busca HTML no site...');
+    console.log(fast
+      ? '[getmods] ⚡ Busca rápida HTML no site...'
+      : '[getmods] ⚠️ Não achou no sitemap. Tentando busca HTML no site...');
 
     const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(query)}`;
 
     await page.goto(searchUrl, {
       waitUntil: 'domcontentloaded',
-      timeout: 60000
+      timeout: fast ? 12000 : 60000
     });
 
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(fast ? 900 : 5000);
 
     const links = await page.evaluate(() => {
       const results = [];

@@ -75,6 +75,27 @@ function stripDeliveryWords(raw) {
     .trim();
 }
 
+export function parseGamePageLinkRequest(rawQuery) {
+  const raw = cleanExternalText(rawQuery, 240).trim();
+  const normalized = normalizeKeywords(raw);
+  const asksForLink = /\b(?:link|url|pagina)\b/.test(normalized);
+  const darVerb = /(?<![\p{L}\p{N}_])me\s+d[áa](?![\p{L}\p{N}_])/iu;
+  const asksToSend = /\b(?:envia|envie|enviar|manda|mande|mandar|passa|passe|mostrar|mostra|mostre|compartilha|compartilhe)\b/.test(normalized) || darVerb.test(raw);
+  if (!raw || !asksForLink || !asksToSend) return null;
+
+  const action = raw.match(/\b(?:envia|envie|enviar|manda|mande|mandar|passa|passe|mostrar|mostra|compartilha|compartilhe)\b/i) || raw.match(darVerb);
+  let query = action ? raw.slice(action.index + action[0].length) : raw;
+  query = query
+    .replace(/^\s*(?:o|a|um|uma)?\s*(?:link|url)(?:\s+(?:da|do|de)\s+(?:p[aá]gina|jogo|game))?\s*/i, "")
+    .replace(/^\s*(?:o|a|um|uma)\s+/i, "")
+    .replace(/^\s*(?:do|da|de)\s+/i, "")
+    .replace(/^\s*(?:jogos?|games?|apk|apps?|aplicativos?)\s*/i, "")
+    .replace(/(?:,?\s*)(?:por favor|por gentileza|pfv)$/i, "")
+    .replace(/[?!.,]+\s*$/, "")
+    .trim();
+  return { query: cleanExternalText(query, 120) };
+}
+
 export function parseGameDeliveryIntent(rawQuery) {
   const raw = cleanExternalText(rawQuery, 240).trim();
   const normalized = normalizeKeywords(raw);
@@ -103,7 +124,8 @@ function catalogResultMatches(title, url, query) {
 
 function normalizeResearchQuery(value) {
   return normalizeKeywords(value)
-    .replace(/^(?:quem foi|quem era|o que foi|o que e|qual foi|me fala sobre|me fale sobre|fale sobre)\s+/, "")
+    .replace(/\b(?:quem foi|quem era|o que foi|o que e|qual foi|me fala sobre|me fale sobre|fale sobre|eu quero saber|quero saber|me explica|explica melhor|hein|oxi|oxe)\b/g, " ")
+    .replace(/\b(?:ele|ela|eles|elas|isso|esse|essa|aquele|aquela)\b/g, " ")
     .replace(/\bdom\b/g, " ")
     .replace(/\bprimeiro\b/g, " i ")
     .replace(/\bsegundo\b/g, " ii ")
@@ -268,21 +290,13 @@ export async function searchGameCatalogs(rawQuery) {
     const provider = APP_PROVIDERS[providerName];
     try {
       const service = await import(provider.module);
-      const results = await service.searchPosts(query);
+      const results = await service.searchPosts(query, { fast: true });
       let match = null;
 
       for (const item of (Array.isArray(results) ? results : []).slice(0, 3)) {
         const url = safeProviderUrl(item?.url, provider.hosts);
-        let title = cleanExternalText(item?.title, 180);
+        const title = cleanExternalText(item?.title, 180);
         if (!url || !catalogResultMatches(title, url, query)) continue;
-
-        if (typeof service.getPostDetails === "function") {
-          try {
-            const details = await service.getPostDetails(url);
-            title = cleanExternalText(details?.title, 180) || title;
-          } catch {}
-        }
-        if (!catalogResultMatches(title, url, query)) continue;
         match = { source: provider.label, title, url };
         break;
       }

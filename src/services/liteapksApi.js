@@ -15,7 +15,7 @@ async function translateToPortuguese(text) {
   } catch { return text; }
 }
 
-export async function searchPosts(query) {
+export async function searchPosts(query, { fast = false } = {}) {
   const context = await createContext({ userAgent: USER_AGENT, locale: 'pt-BR' });
   const page = await context.newPage();
   try {
@@ -26,8 +26,8 @@ export async function searchPosts(query) {
 
     console.log(`[liteapks] 🔎 Buscando "${query}"...`);
     const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(5000);
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: fast ? 12000 : 60000 });
+    await page.waitForTimeout(fast ? 900 : 5000);
     
     const links = await page.evaluate(() => {
       const results = [];

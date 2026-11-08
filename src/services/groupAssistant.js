@@ -4,6 +4,7 @@ import { isGroupAiEnabled } from "../utils/aiGroupSettings.js";
 import { answerFromEvidence } from "./localAssistant.js";
 import {
   collectConversationEvidence,
+  parseGamePageLinkRequest,
   parseGameDeliveryIntent,
   searchGameCatalogs,
 } from "./assistantSources.js";
@@ -24,6 +25,7 @@ const lastSenderEnqueue = new Map();
 const groupWindows = new Map();
 const seenMessageIds = new Map();
 const recentUserMessages = new Map();
+const recentGameResults = new Map();
 const lastFailureNotice = new Map();
 let draining = false;
 
@@ -46,6 +48,7 @@ function greetingReply(text) {
   if (/^(oi+|ola|opa|salve|bom dia|boa tarde|boa noite|e ai|fala|tudo bem)$/.test(normalized)) {
     return "Oi! Manda a pergunta ou o assunto; quando for algo factual, eu pesquiso antes de responder.";
   }
+  if (/^(oxi|oxe|hein)$/.test(normalized)) return "Opa, manda aí — o que você quis dizer?";
   return "";
 }
 
@@ -68,7 +71,7 @@ function getConversationContext(actorKey) {
 }
 
 function isFollowUp(text) {
-  return /^(?:e\b|isso\b|ele\b|ela\b|esse\b|essa\b|sim\b|não\b|nao\b|onde\b|quando\b|por que\b|qual deles\b|mais\b|como assim\b)/i.test(text.trim());
+  return /^(?:e\b|isso\b|ele\b|ela\b|esse\b|essa\b|sim\b|não\b|nao\b|onde\b|quando\b|por que\b|qual deles\b|mais\b|como assim\b|hein\b|oxi\b|oxe\b|mas\b|então\b|entao\b|(?:eu\s+)?quero saber\b|me explica\b|explica melhor\b)/i.test(text.trim());
 }
 
 function searchQueryFor(text, context) {
@@ -106,6 +109,43 @@ function gameSearchReply(result) {
   return `Procurei “${cleanExternalText(result.query, 100)}” nos catálogos do Atlas (GetMods, LiteAPKs, AN1 e Android Tunado), mas não achei. Se houver outra grafia, me fala que tento de novo.`;
 }
 
+function rememberGameResult(actorKey, result) {
+  if (!actorKey || !result) return;
+  recentGameResults.set(actorKey, { result, updatedAt: Date.now() });
+  trimMap(recentGameResults);
+}
+
+function getRecentGameResult(actorKey) {
+  const saved = recentGameResults.get(actorKey);
+  if (!saved) return null;
+  if (Date.now() - saved.updatedAt > 10 * 60_000) {
+    recentGameResults.delete(actorKey);
+    return null;
+  }
+  return saved.result;
+}
+
+async function searchCatalogsAndCloseBrowser(query) {
+  try {
+    return await searchGameCatalogs(query);
+  } finally {
+    const { closeBrowser } = await import("./browserManager.js");
+    await closeBrowser().catch(() => {});
+  }
+}
+
+function pageLinkReply(result, requestedQuery = "") {
+  const match = result?.matches?.[0];
+  if (match?.url) {
+    return `Claro, achei a página “${cleanExternalText(match.title, 100)}” no ${match.source}: ${cleanExternalText(match.url, 300)}`;
+  }
+  if (result?.checked?.length && result.checked.every((item) => !item.ok)) {
+    return "Não consegui consultar os catálogos agora. Tenta de novo daqui a pouco.";
+  }
+  const query = requestedQuery || result?.query || "esse jogo";
+  return `Não achei a página de “${cleanExternalText(query, 100)}” nos catálogos que responderam.`;
+}
+
 async function processItem(item) {
   const { socket, remoteJid, text, actorKey } = item;
   const context = isFollowUp(text) ? getConversationContext(actorKey) : "";
@@ -113,6 +153,22 @@ async function processItem(item) {
   const greeting = greetingReply(text);
   if (greeting) {
     await sendText(socket, remoteJid, greeting);
+    return;
+  }
+
+  const pageLinkIntent = parseGamePageLinkRequest(text);
+  if (pageLinkIntent) {
+    const cached = getRecentGameResult(actorKey);
+    let result = cached;
+    if (pageLinkIntent.query && cached?.query?.toLocaleLowerCase("pt-BR") !== pageLinkIntent.query.toLocaleLowerCase("pt-BR")) {
+      result = await searchCatalogsAndCloseBrowser(pageLinkIntent.query);
+      rememberGameResult(actorKey, result);
+    }
+    if (!pageLinkIntent.query && !result) {
+      await sendText(socket, remoteJid, "Qual jogo? Me fala o nome e eu procuro a página nos catálogos do Atlas.");
+      return;
+    }
+    await sendText(socket, remoteJid, pageLinkReply(result, pageLinkIntent.query));
     return;
   }
 
@@ -126,13 +182,8 @@ async function processItem(item) {
     return;
   }
   if (gameIntent?.kind === "game") {
-    let result;
-    try {
-      result = await searchGameCatalogs(gameIntent.query);
-    } finally {
-      const { closeBrowser } = await import("./browserManager.js");
-      await closeBrowser().catch(() => {});
-    }
+    const result = await searchCatalogsAndCloseBrowser(gameIntent.query);
+    rememberGameResult(actorKey, result);
     await sendText(socket, remoteJid, gameSearchReply(result));
     return;
   }
@@ -150,7 +201,7 @@ async function processItem(item) {
     return;
   }
 
-  const selectedEvidence = evidence.slice(0, 4);
+  const selectedEvidence = evidence.slice(0, 2);
   const answer = await answerFromEvidence(text, selectedEvidence, context);
   await sendText(socket, remoteJid, cleanExternalText(answer, 1800));
 }
@@ -196,6 +247,8 @@ export function enqueueGroupAssistant({ socket, webMessage, fullMessage, remoteJ
   const text = cleanExternalText(fullMessage, MAX_QUERY_CHARS);
   if (!text || text === "#auto-command" || text.length < 3 || isNoise(text)) return false;
 
+  const conversationalFollowUp = Boolean(greetingReply(text)) || isFollowUp(text) || Boolean(parseGamePageLinkRequest(text));
+
   const prefix = getPrefix(remoteJid);
   if (prefix && text.startsWith(prefix)) return false;
 
@@ -213,12 +266,12 @@ export function enqueueGroupAssistant({ socket, webMessage, fullMessage, remoteJ
 
   const now = Date.now();
   const lastGroupAt = lastGroupEnqueue.get(remoteJid) || 0;
-  if (now - lastGroupAt < GROUP_COOLDOWN_MS) return false;
+  if (now - lastGroupAt < GROUP_COOLDOWN_MS && !conversationalFollowUp) return false;
 
   const sender = String(userLid || webMessage?.key?.participant || "unknown").replace(/:[0-9]+(?=@)/g, "");
   const actorKey = `${remoteJid}:${sender}`;
   const lastSenderAt = lastSenderEnqueue.get(actorKey) || 0;
-  if (now - lastSenderAt < SENDER_COOLDOWN_MS) return false;
+  if (now - lastSenderAt < SENDER_COOLDOWN_MS && !conversationalFollowUp) return false;
 
   const window = groupWindows.get(remoteJid);
   const currentWindow = !window || now - window.startedAt >= 60_000

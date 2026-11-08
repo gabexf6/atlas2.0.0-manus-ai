@@ -41,14 +41,14 @@ function scoreResult(title, query) {
   return (matches / queryWords.length) * 50;
 }
 
-export async function searchPosts(query) {
+export async function searchPosts(query, { fast = false } = {}) {
   const context = await createContext({ userAgent: USER_AGENT, locale: 'pt-BR' });
   const page = await context.newPage();
   try {
     const searchUrl = `${BASE_URL}/?do=search&subaction=search&story=${encodeURIComponent(query)}`;
     console.log(`[an1] 🔎 Buscando "${query}"...`);
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(4000); 
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: fast ? 12000 : 60000 });
+    await page.waitForTimeout(fast ? 900 : 4000);
     const results = await page.evaluate(() => {
       const items = [];
       const cards = document.querySelectorAll('div.item');
